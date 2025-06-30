@@ -1,40 +1,87 @@
-﻿namespace Medusa
-
-open System
+﻿open System
 open System.Text.Json
 open System.IO
 open System.Threading
 open System.Threading.Tasks
 
-module Program =
+open Microsoft.Extensions.Logging
 
-    [<EntryPoint>]
-    let main args =
-        let cts = new CancellationTokenSource()
+open JDeck
 
-        let work =
-            task {
-                printfn "Installing packages..."
+open Medusa
+open Medusa.Types
+open Medusa.RequestHandler
 
-                let! genResponse =
-                    PackageManager.install ([ "jquery"; "react"; "vue"; "lit" ], cancellationToken = cts.Token)
+let orchestrate() =
+  let loggerFactory =
+    LoggerFactory.Create(fun builder ->
+      builder
+        .AddConsole()
+#if DEBUG
+        .SetMinimumLevel(LogLevel.Debug)
+#else
+        .SetMinimumLevel(LogLevel.Information)
+#endif
+      |> ignore)
 
-                File.WriteAllText("./dependencies.json", JsonSerializer.Serialize genResponse)
+  let logger = loggerFactory.CreateLogger(nameof Medusa)
 
-                printfn "Started downloading packages... %s" (DateTime.Now.ToString "o")
+  let jsOptions = JsonOptions.shared.Value
 
-                let! response = PackageManager.download (genResponse.map, cancellationToken = cts.Token)
+  let jspmApi = JspmService.create(Some jsOptions)
 
-                printfn "Finished downloading packages... %s" (DateTime.Now.ToString "o")
+  let importMapService =
+    ImportMapService.create {
+      reqHandler = jspmApi
+      logger = logger
+    }
 
-                File.WriteAllText("./downloaded.json", JsonSerializer.Serialize response)
+  importMapService, logger
 
-                File.WriteAllText("./dependencies.importmap", JsonSerializer.Serialize genResponse.map)
 
-                let! result = PackageManager.toOffline (genResponse.map, cancellationToken = cts.Token)
+[<EntryPoint>]
+let main args =
+  use cts = new CancellationTokenSource()
+  Console.CancelKeyPress.Add(fun args -> cts.Cancel())
 
-                printfn "Offline import map created: %A" result
-            }
+  task {
+    let imService, logger = orchestrate()
+    logger.LogInformation("Starting installation and offline caching...")
 
-        work.GetAwaiter().GetResult()
-        0
+    logger.LogInformation("Installing packages: jquery, xstate, vue")
+
+    let! result =
+      imService.Install(
+        [ "jquery"; "xstate"; "vue" ],
+        cancellationToken = cts.Token
+      )
+
+    let onlineMap = result.map |> PartialImportMap.toImportMap
+
+    do!
+      File.WriteAllTextAsync(
+        "online-map.importmap",
+        JsonSerializer.Serialize(onlineMap, JsonOptions.shared.Value),
+        cts.Token
+      )
+
+    logger.LogInformation("Generated Online Map: {ImportMap}", onlineMap)
+
+    let! result = imService.GoOffline(onlineMap, cancellationToken = cts.Token)
+
+    logger.LogInformation(
+      "Installation and offline caching completed successfully."
+    )
+
+    logger.LogInformation("Generated Offline Map: {ImportMap}", result)
+
+    do!
+      File.WriteAllTextAsync(
+        "offline-map.importmap",
+        JsonSerializer.Serialize(result, JsonOptions.shared.Value),
+        cts.Token
+      )
+
+    return 0
+  }
+  |> _.GetAwaiter().GetResult()

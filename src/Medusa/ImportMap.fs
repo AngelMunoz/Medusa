@@ -4,311 +4,406 @@ open System
 open System.IO
 open System.Text.Json
 open System.Threading
+open Microsoft.Extensions.Logging
 open FsHttp
 open IcedTasks
 open JDeck
+open Medusa
+open Medusa.Types
+open System.Threading.Tasks
 
 module ImportMap =
-    open Types
 
-    let private cachePath =
-        lazy
-            (Path.Combine(
-                Environment.GetFolderPath Environment.SpecialFolder.LocalApplicationData,
-                "perla",
-                "v1",
-                "store"
-            ))
+  type ImportMapServiceArgs = {
+    reqHandler: RequestHandler.JspmService
+    logger: ILogger
+  }
 
-    let private localCachePath =
-        lazy (Path.Combine(Directory.GetCurrentDirectory(), "web_dependencies"))
+  let private cachePath =
+    lazy
+      (Path.Combine(
+        Environment.GetFolderPath Environment.SpecialFolder.LocalApplicationData,
+        "medusa",
+        "v1",
+        "store"
+      ))
 
-    let private localCachePrefix = lazy (Path.Combine("web_dependencies"))
+  let private localCachePath =
+    lazy (Path.Combine(Directory.GetCurrentDirectory(), "web_dependencies"))
 
-    module private Required =
-        let map<'T> : Decoder<Map<string, 'T>> = fun map -> Decode.auto<Map<string, 'T>> map
+  [<Literal>]
+  let private LOCAL_CACHE_PREFIX = "/web_dependencies"
 
-    let private importMapDecoder: Decoder<Types.ImportMap> =
-        fun map ->
-            decode {
-                let! imports = map |> Optional.Property.get ("imports", Required.map<string>)
-                let! scopes = map |> Optional.Property.get ("scopes", Required.map<Map<string, string>>)
-                let! integrity = map |> Optional.Property.get ("integrity", Required.map<string>)
+  // Use shared JSON options for consistent serialization/deserialization
+  let private jsonOptions: Lazy<JsonSerializerOptions> = JsonOptions.shared
 
-                return
-                    { imports = defaultArg imports Map.empty
-                      scopes = defaultArg scopes Map.empty
-                      integrity = defaultArg integrity Map.empty }
-            }
+  let private extractPackagesWithScopes(map: ImportMap) =
+    let imports = map.imports |> Map.values
+    let scopeImports = map.scopes |> Map.values |> Seq.collect Map.values
 
-    let private downloadResponseDecoder: Decoder<Types.DownloadResponse> =
-        fun res ->
-            decode {
-                let attempt = Decode.auto<Map<string, Types.DownloadPackage>> res
+    [
+      for value in [| yield! imports; yield! scopeImports |] do
+        let uri = Uri(value)
 
-                match attempt with
-                | Ok success -> return Types.DownloadSuccess success
-                | Error _ ->
-                    let! err = Decode.auto<Types.DownloadResponseError> res
-                    return Types.DownloadError err
-            }
+        match Provider.extractFromUri uri with
+        | Ok package -> package
+        | Error _ -> ()
+    ]
+    |> Set
 
-    let private extractPackagesWithScopes (map: Types.ImportMap) =
-        let imports = map.imports |> Map.values
-        let scopeImports = map.scopes |> Map.values |> Seq.collect Map.values
+  let private cacheResponse
+    (logger: ILogger)
+    (response: Map<string, DownloadPackage>)
+    =
+    cancellableTask {
+      let cacheDir = Directory.CreateDirectory(cachePath.Value)
+      let localCacheDir = Directory.CreateDirectory(localCachePath.Value)
 
-        [ for value in [| yield! imports; yield! scopeImports |] do
-              let uri = Uri(value)
+      logger.LogDebug(
+        "Caching downloaded packages to: {cacheDir}",
+        cacheDir.FullName
+      )
 
-              match Provider.extractFromUri uri with
-              | Ok package -> package
-              | Error _ -> () ]
-        |> Set
+      logger.LogTrace("Working with Download Map: {downloadMap}", response)
 
-    let private cacheResponse (response: Map<string, Types.DownloadPackage>) =
-        cancellableTask {
-            let cacheDir = Directory.CreateDirectory(cachePath.Value)
-            let localCacheDir = Directory.CreateDirectory(localCachePath.Value)
+      let tasks =
+        response
+        |> Map.toArray
+        |> Array.map(fun (package, content) -> asyncEx {
+          let! token = Async.CancellationToken
+          let localPkgPath = Path.Combine(localCacheDir.FullName, package)
+          let localPkgTarget = Path.Combine(cacheDir.FullName, package)
 
-            let tasks =
-                response
-                |> Map.toArray
-                |> Array.map (fun (package, content) ->
-                    asyncEx {
-                        let! token = Async.CancellationToken
-                        let localPkgPath = Path.Combine(localCacheDir.FullName, package)
-                        let localPkgTarget = Path.Combine(cacheDir.FullName, package)
+          // Create Parent Directories
+          Path.GetDirectoryName(localPkgPath)
+          |> nonNull
+          |> Directory.CreateDirectory
+          |> ignore
 
-                        // Create Parent Directories
-                        Path.GetDirectoryName(localPkgPath)
-                        |> nonNull
-                        |> Directory.CreateDirectory
-                        |> ignore
-
-                        // If the local store already has the package, skip creating the symbolic link
-                        if Directory.Exists(localPkgPath) then
-                            printfn "Package '%s' already exists, skipping symbolic link creation." package
-                        else
-                            Directory.CreateSymbolicLink(localPkgPath, localPkgTarget) |> ignore
-
-                        if Directory.Exists(Path.Combine(cacheDir.FullName, package)) then
-                            printfn "Package '%s' already exists, skipping download." package
-                            return ()
-                        else
-                            printfn "Downloading package '%s'..." package
-
-                            for file in content.files do
-                                let filePath = Path.Combine(cacheDir.FullName, package, file)
-                                let downloadUri = Uri(content.pkgUrl, file)
-
-                                let! response =
-                                    get (downloadUri.ToString())
-                                    |> Config.timeoutInSeconds 10
-                                    |> Config.cancellationToken token
-                                    |> Request.sendAsync
-
-                                use! content = response |> Response.toStreamAsync
-
-                                Directory.CreateDirectory(
-                                    Path.GetDirectoryName filePath |> nonNull |> Path.GetFullPath
-                                )
-                                |> ignore
-
-                                use file = File.OpenWrite filePath
-                                do! content.CopyToAsync(file, cancellationToken = token)
-                    })
-
-            do! Async.Parallel tasks |> Async.Ignore
-            return ()
-        }
-
-    let install (options: Types.GeneratorOption seq) (packages: Set<string>) =
-        cancellableTask {
-            let! token = CancellableTask.getCancellationToken ()
-            let url = $"{Constants.JSPM_API_URL}generate"
-
-            let finalOptions = GeneratorOption.toDict options
-            finalOptions.Add("install", packages)
-
-            let! req =
-                http {
-                    POST url
-                    body
-                    jsonSerialize finalOptions
-                }
-                |> Config.cancellationToken token
-                |> Request.sendTAsync
-
-            let! response = Response.deserializeJsonTAsync<Types.GeneratorResponse> token req
-            return response
-        }
-
-    let update (options: Types.GeneratorOption seq) (map: Types.ImportMap) (packages: Set<string>) =
-        cancellableTask {
-            let! token = CancellableTask.getCancellationToken ()
-            let url = $"{Constants.JSPM_API_URL}generate"
-
-            let finalOptions = GeneratorOption.toDict options
-            finalOptions.Add("update", packages)
-            finalOptions["inputMap"] <- map
-
-            let! req =
-                http {
-                    POST url
-                    body
-                    jsonSerialize finalOptions
-                }
-                |> Config.cancellationToken token
-                |> Request.sendTAsync
-
-            let! response = Response.deserializeJsonTAsync<Types.GeneratorResponse> token req
-            return response
-        }
-
-    let uninstall (options: Types.GeneratorOption seq) (map: Types.ImportMap) (packages: Set<string>) =
-        cancellableTask {
-            let! token = CancellableTask.getCancellationToken ()
-            let url = $"{Constants.JSPM_API_URL}generate"
-
-            let finalOptions = GeneratorOption.toDict options
-            finalOptions.Add("uninstall", packages)
-            finalOptions["inputMap"] <- map
-
-            let! req =
-                http {
-                    POST url
-                    body
-                    jsonSerialize finalOptions
-                }
-                |> Config.cancellationToken token
-                |> Request.sendTAsync
-
-            let! response = Response.deserializeJsonTAsync<Types.GeneratorResponse> token req
-            return response
-        }
-
-    let download (options: Types.DownloadOption seq) (map: Types.ImportMap) =
-        cancellableTask {
-            let! token = CancellableTask.getCancellationToken ()
-            let url = $"{Constants.JSPM_API_URL}download/"
-
-            let! req =
-                http {
-                    GET url
-
-                    query
-                        [ "packages", extractPackagesWithScopes map |> String.concat ","
-                          for option in options do
-                              match option with
-                              | Types.Provider provider ->
-                                  "provider",
-                                  match provider with
-                                  | Types.DownloadProvider.JspmIo -> "jspm.io"
-                                  | Types.DownloadProvider.JsDelivr -> "jsdelivr"
-                                  | Types.DownloadProvider.Unpkg -> "unpkg"
-                              | Types.Exclude excludes ->
-                                  "exclude",
-                                  [| for exclude in excludes ->
-                                         match exclude with
-                                         | Types.ExcludeOption.Unused -> "unused"
-                                         | Types.ExcludeOption.Types -> "types"
-                                         | Types.ExcludeOption.SourceMaps -> "sourcemaps"
-                                         | Types.ExcludeOption.Readme -> "readme"
-                                         | Types.ExcludeOption.License -> "license" |]
-                                  |> String.concat "," ]
-
-                    config_cancellationToken token
-                }
-                |> Request.sendTAsync
-
-            use! response = Response.toStreamAsync req
-
-            let jsonOptions =
-                JsonSerializerOptions(WriteIndented = true)
-                |> Codec.useDecoder downloadResponseDecoder
-
-            let! response =
-                JsonSerializer.DeserializeAsync<Types.DownloadResponse>(
-                    response,
-                    jsonOptions,
-                    cancellationToken = token
-                )
-
-            match response with
-            | Types.DownloadError err -> return raise (Exception $"Download failed: {err.error}")
-            | Types.DownloadSuccess response ->
-                printfn "Download Success: %d packages downloaded" response.Count
-                // Cache the downloaded packages
-                do! cacheResponse response
-                return response
-        }
-
-    let toOffline (options: Types.DownloadOption seq) (map: Types.ImportMap) =
-        cancellableTask {
-            let allScopedImports =
-                map.scopes |> Map.values |> Seq.collect Map.toSeq |> Map.ofSeq
-
-            let combinedImports =
-                map.imports |> Map.fold (fun state k v -> state |> Map.add k v) allScopedImports
-
-            let! pkgs = download options { map with imports = combinedImports }
-            let localPrefix = $"/{localCachePrefix.Value.Replace('\\', '/')}"
-
-            // Helper function to extract package name from key
-            let extractPackageName (key: string) =
-                let parts = key.Split('@')
-                if parts.Length > 2 then "@" + parts[1] else parts[0]
-
-            // Helper function to find matching package key
-            let findMatchingKey (pkgName: string) (importUrl: string) =
-                pkgs
-                |> Map.keys
-                |> Seq.tryFind (fun k ->
-                    let pkgNameFromKey = extractPackageName k
-                    pkgNameFromKey = pkgName || importUrl.Contains(k))
-
-            // Helper function to convert URL to local cache path
-            let convertToLocalPath importUrl matchingKey =
-                match matchingKey with
-                | None -> importUrl
-                | Some key ->
-                    let uri = Uri importUrl
-                    let filePath = Provider.extractFilePath uri
-                    // If extractFilePath returned the original URL (couldn't extract), keep it as is
-                    if filePath = importUrl then
-                        importUrl
-                    else
-                        Path.Combine(localPrefix, key, filePath).Replace('\\', '/')
-
-            // Helper function to update a scope map
-            let updateScopeMap (scopeMap: Map<string, string>) =
-                scopeMap
-                |> Map.map (fun pkgName importUrl ->
-                    let matchingKey = findMatchingKey pkgName importUrl
-                    convertToLocalPath importUrl matchingKey)
-
-            // Build a new imports map with local paths
-            let updatedImports =
-                map.imports
-                |> Map.map (fun pkgName importUrl ->
-                    let matchingKey = findMatchingKey pkgName importUrl
-                    convertToLocalPath importUrl matchingKey)
-
-            let updatedScopes =
-                map.scopes
-                |> Seq.map (fun (KeyValue(_, scopeMap)) -> localPrefix, updateScopeMap scopeMap)
-                |> Map.ofSeq
-
-            let offlineMap =
-                { map with
-                    imports = updatedImports
-                    scopes = updatedScopes }
-
-            // Write the offline import map to disk
-            File.WriteAllText(
-                "./offline.importmap",
-                JsonSerializer.Serialize(offlineMap, JsonSerializerOptions(WriteIndented = true))
+          // If the local store already has the package, skip creating the symbolic link
+          if Directory.Exists(localPkgPath) then
+            logger.LogDebug(
+              "Package '{package}' already exists, skipping symbolic link creation.",
+              package
             )
 
-            return offlineMap
-        }
+            return ()
+          else
+            logger.LogDebug(
+              "Creating symlink to store: {localPkgPath} -> {localPkgTarget}",
+              localPkgPath,
+              localPkgTarget
+            )
+
+            Directory.CreateSymbolicLink(localPkgPath, localPkgTarget)
+            |> ignore
+
+          if Directory.Exists(Path.Combine(cacheDir.FullName, package)) then
+            logger.LogDebug(
+              "Package '{package}' already exists, skipping download.",
+              package
+            )
+
+            return ()
+          else
+            logger.LogDebug("Downloading package '{package}'...", package)
+
+            logger.LogDebug(
+              "Working through {content.files.Length} files...",
+              content.files.Length
+            )
+
+            for file in content.files do
+              let filePath = Path.Combine(cacheDir.FullName, package, file)
+              let downloadUri = Uri(content.pkgUrl, file)
+
+              let! response =
+                get(downloadUri.ToString())
+                |> Config.timeoutInSeconds 10
+                |> Config.cancellationToken token
+                |> Request.sendAsync
+
+              use! content = response |> Response.toStreamAsync
+
+              Directory.CreateDirectory(
+                Path.GetDirectoryName filePath |> nonNull |> Path.GetFullPath
+              )
+              |> ignore
+
+              use file = File.OpenWrite filePath
+
+              do! content.CopyToAsync(file, cancellationToken = token)
+
+              logger.LogTrace("Downloaded file: {filePath}", filePath)
+
+            return ()
+        })
+
+      do! Async.Parallel tasks |> Async.Ignore
+      return ()
+    }
+
+  let private download
+    (dependencies: ImportMapServiceArgs)
+    (options: DownloadOption seq)
+    (map: ImportMap)
+    =
+    cancellableTask {
+      let! token = CancellableTask.getCancellationToken()
+      let packages = extractPackagesWithScopes map
+
+      let {
+            reqHandler = reqHandler
+            logger = logger
+          } =
+        dependencies
+
+      let options = [
+        for option in options do
+          match option with
+          | Provider provider ->
+            "provider",
+            match provider with
+            | JspmIo -> "jspm.io"
+            | JsDelivr -> "jsdelivr"
+            | Unpkg -> "unpkg"
+          | Exclude excludes ->
+            "exclude",
+            [|
+              for exclude in excludes ->
+                match exclude with
+                | Unused -> "unused"
+                | Types -> "types"
+                | SourceMaps -> "sourcemaps"
+                | Readme -> "readme"
+                | License -> "license"
+            |]
+            |> String.concat ","
+      ]
+
+      let packages = packages |> String.concat ","
+
+      logger.LogTrace("Downloading packages: {packages}", packages)
+      logger.LogTrace("Download options: {options}", options)
+
+      let! response =
+        reqHandler.Download(packages, options, cancellationToken = token)
+
+      match response with
+      | DownloadError err ->
+        return raise(Exception $"Download failed: {err.error}")
+      | DownloadSuccess response ->
+        logger.LogDebug(
+          "Download Success: {count} packages downloaded",
+          response.Count
+        )
+
+        return response
+    }
+
+  let install
+    (dependencies: ImportMapServiceArgs)
+    (options: GeneratorOption seq)
+    (packages: Set<string>)
+    =
+    cancellableTask {
+      let! token = CancellableTask.getCancellationToken()
+      let { reqHandler = reqHandler } = dependencies
+
+      let finalOptions = GeneratorOption.toDict options
+      finalOptions.Add("install", packages)
+
+      return! reqHandler.Install(finalOptions, cancellationToken = token)
+    }
+
+  let update
+    (dependencies: ImportMapServiceArgs)
+    (options: GeneratorOption seq)
+    (map: ImportMap)
+    (packages: Set<string>)
+    =
+    cancellableTask {
+      let! token = CancellableTask.getCancellationToken()
+      let { reqHandler = reqHandler } = dependencies
+
+      let finalOptions = GeneratorOption.toDict options
+      finalOptions.Add("update", packages)
+      finalOptions["inputMap"] <- map
+
+      return! reqHandler.Update(finalOptions, cancellationToken = token)
+    }
+
+  let uninstall
+    (dependencies: ImportMapServiceArgs)
+    (options: GeneratorOption seq)
+    (map: ImportMap)
+    (packages: Set<string>)
+    =
+    cancellableTask {
+      let! token = CancellableTask.getCancellationToken()
+      let { reqHandler = reqHandler } = dependencies
+
+      let finalOptions = GeneratorOption.toDict options
+      finalOptions.Add("uninstall", packages)
+      finalOptions["inputMap"] <- map
+
+      return! reqHandler.Uninstall(finalOptions, cancellationToken = token)
+    }
+
+  /// Generates a map that can be persisted to disk for offline use
+  let goOffline
+    (dependencies: ImportMapServiceArgs)
+    (options: DownloadOption seq)
+    (map: ImportMap)
+    =
+    cancellableTask {
+      let { logger = logger } = dependencies
+
+      let allScopedImports =
+        map.scopes |> Map.values |> Seq.collect Map.toSeq |> Map.ofSeq
+
+      let combinedImports =
+        map.imports
+        |> Map.fold (fun state k v -> state |> Map.add k v) allScopedImports
+
+      let! pkgs =
+        download dependencies options { map with imports = combinedImports }
+
+      // Cache the downloaded packages
+      do! cacheResponse logger pkgs
+
+      let localPrefix = LOCAL_CACHE_PREFIX
+
+      // Helper function to extract package name from key
+      let extractPackageName(key: string) =
+        let parts = key.Split('@')
+        if parts.Length > 2 then "@" + parts[1] else parts[0]
+
+      // Helper function to find matching package key
+      let findMatchingKey (pkgName: string) (importUrl: string) =
+        pkgs
+        |> Map.keys
+        |> Seq.tryFind(fun k ->
+          let pkgNameFromKey = extractPackageName k
+          pkgNameFromKey = pkgName || importUrl.Contains(k))
+
+      // Helper function to convert URL to local cache path
+      let convertToLocalPath importUrl matchingKey =
+        match matchingKey with
+        | None -> importUrl
+        | Some key ->
+          let uri = Uri importUrl
+          let filePath = Provider.extractFilePath logger uri
+          // If extractFilePath returned the original URL (couldn't extract), keep it as is
+          if filePath = importUrl then
+            importUrl
+          else
+            Path.Combine(localPrefix, key, filePath).Replace('\\', '/')
+
+      // Helper function to update a scope map
+      let updateScopeMap(scopeMap: Map<string, string>) =
+        scopeMap
+        |> Map.map(fun pkgName importUrl ->
+          let matchingKey = findMatchingKey pkgName importUrl
+
+          logger.LogDebug(
+            "Updating scope '{pkgName}' with import URL '{importUrl}'",
+            pkgName,
+            importUrl
+          )
+
+          let converted = convertToLocalPath importUrl matchingKey
+
+          logger.LogDebug(
+            "Converted import URL to local path: '{converted}'",
+            converted
+          )
+
+          converted)
+
+      // Build a new imports map with local paths
+      let updatedImports =
+        map.imports
+        |> Map.map(fun pkgName importUrl ->
+          let matchingKey = findMatchingKey pkgName importUrl
+          convertToLocalPath importUrl matchingKey)
+
+      let updatedScopes =
+        map.scopes
+        |> Seq.map(fun (KeyValue(_, scopeMap)) ->
+          localPrefix, updateScopeMap scopeMap)
+        |> Map.ofSeq
+
+      let offlineMap = {
+        map with
+            imports = updatedImports
+            scopes = updatedScopes
+      }
+
+      logger.LogDebug("Generated offline map {map}", offlineMap)
+
+      return offlineMap
+    }
+
+type ImportMapService =
+
+  abstract member Install:
+    packages: string seq *
+    ?options: GeneratorOption seq *
+    ?cancellationToken: CancellationToken ->
+      Task<GeneratorResponse>
+
+  abstract member Update:
+    map: ImportMap *
+    packages: string seq *
+    ?options: GeneratorOption seq *
+    ?cancellationToken: CancellationToken ->
+      Task<GeneratorResponse>
+
+  abstract member Uninstall:
+    map: ImportMap *
+    packages: string seq *
+    ?options: GeneratorOption seq *
+    ?cancellationToken: CancellationToken ->
+      Task<GeneratorResponse>
+
+  abstract member GoOffline:
+    map: ImportMap *
+    ?options: DownloadOption seq *
+    ?cancellationToken: CancellationToken ->
+      Task<ImportMap>
+
+
+module ImportMapService =
+  let create(dependencies: ImportMap.ImportMapServiceArgs) : ImportMapService =
+    { new ImportMapService with
+        member _.Install(packages, options, cancellationToken) =
+          ImportMap.install
+            dependencies
+            (defaultArg options Seq.empty)
+            (Set packages)
+            (defaultArg cancellationToken CancellationToken.None)
+
+        member _.Update(map, packages, options, cancellationToken) =
+          ImportMap.update
+            dependencies
+            (defaultArg options Seq.empty)
+            map
+            (Set packages)
+            (defaultArg cancellationToken CancellationToken.None)
+
+        member _.Uninstall(map, packages, options, cancellationToken) =
+          ImportMap.uninstall
+            dependencies
+            (defaultArg options Seq.empty)
+            map
+            (Set packages)
+            (defaultArg cancellationToken CancellationToken.None)
+
+        member _.GoOffline(map, options, cancellationToken) =
+          ImportMap.goOffline
+            dependencies
+            (defaultArg options Seq.empty)
+            map
+            (defaultArg cancellationToken CancellationToken.None)
+    }

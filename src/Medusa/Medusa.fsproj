@@ -1,24 +1,22 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
-
+<Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <OutputType>Exe</OutputType>
     <TargetFramework>net9.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
   </PropertyGroup>
-
   <ItemGroup>
     <PackageReference Include="FsHttp" Version="14.5.0" />
     <PackageReference Include="IcedTasks" Version="0.11.7" />
     <PackageReference Include="JDeck" Version="1.0.0-beta-006" />
+    <PackageReference Include="Microsoft.Extensions.Logging" Version="9.0.6" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Console" Version="9.0.6" />
   </ItemGroup>
-
   <ItemGroup>
     <Compile Include="Types.fs" />
     <Compile Include="Provider.fs" />
+    <Compile Include="RequestHandler.fs" />
     <Compile Include="ImportMap.fs" />
-    <Compile Include="PackageManager.fs" />
     <Compile Include="Program.fs" />
   </ItemGroup>
-
 </Project>

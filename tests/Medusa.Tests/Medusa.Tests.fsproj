@@ -13,6 +13,8 @@
     <PackageReference Include="FsHttp" Version="14.5.0" />
     <PackageReference Include="IcedTasks" Version="0.11.7" />
     <PackageReference Include="JDeck" Version="1.0.0-beta-006" />
+    <PackageReference Include="Microsoft.Extensions.Logging" Version="9.0.6" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Console" Version="9.0.6" />
   </ItemGroup>
 
   <ItemGroup>
