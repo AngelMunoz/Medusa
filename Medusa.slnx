@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Medusa/Medusa.fsproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Medusa.Tests/Medusa.Tests.fsproj" />
+  </Folder>
+</Solution>
