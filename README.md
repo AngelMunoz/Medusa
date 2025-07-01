@@ -7,25 +7,28 @@
 ## ✨ Features
 
 - 🗺️ **Import Map-Centric**: Generate standard ES Import Maps for seamless module resolution
-- 📦 **Offline-First**: Transform online import maps to offline-ready versions with local paths
 - ⚡ **Zero Duplication**: Packages are cached once in a central store
 - 🌐 **Multiple Providers**: Support for JSPM, jsDelivr, Unpkg, and more
 - 🔄 **Full Lifecycle**: Install, update, uninstall, and offline operations
 
 ## 📁 How It Works
 
-### Central Store Architecture
+### Central Store For Disk Space Efficiency
 
 ```
-%LocalAppData%\medusa\v1\store\
+%LocalAppData%/medusa/v1/store/
 ├── jquery@3.7.1/
 ├── vue@3.5.17/
 └── xstate@5.19.4/
 
-./web_dependencies/        (symlinks)
-├── jquery@3.7.1/ → %LocalAppData%\medusa\v1\store\jquery@3.7.1/
-├── vue@3.5.17/ → %LocalAppData%\medusa\v1\store\vue@3.5.17/
-└── xstate@5.19.4/ → %LocalAppData%\medusa\v1\store\xstate@5.19.4/
+./node_modules/
+├── .medusa/                    (versioned packages)
+│   ├── jquery@3.7.1/ → %LocalAppData%/medusa/v1/store/jquery@3.7.1/
+│   ├── vue@3.5.17/ → %LocalAppData%/medusa/v1/store/vue@3.5.17/
+│   └── xstate@5.19.4/ → %LocalAppData%/medusa/v1/store/xstate@5.19.4/
+├── jquery → .medusa/jquery@3.7.1/
+├── vue → .medusa/vue@3.5.17/
+└── xstate → .medusa/xstate@5.19.4/
 ```
 
 ### Import Map Transformation
@@ -35,9 +38,20 @@
 ```json
 {
   "imports": {
+    "jquery": "https://ga.jspm.io/npm:jquery@3.7.1/dist/jquery.js",
+    "lit": "https://ga.jspm.io/npm:lit@3.3.0/index.js",
     "vue": "https://ga.jspm.io/npm:vue@3.5.17/dist/vue.runtime.esm-browser.prod.js",
-    "jquery": "https://ga.jspm.io/npm:jquery@3.7.1/dist/jquery.js"
-  }
+    "xstate": "https://ga.jspm.io/npm:xstate@5.19.4/dist/xstate.cjs.mjs"
+  },
+  "scopes": {
+    "https://ga.jspm.io/": {
+      "@lit/reactive-element": "https://ga.jspm.io/npm:@lit/reactive-element@2.1.0/reactive-element.js",
+      "lit-element/lit-element.js": "https://ga.jspm.io/npm:lit-element@4.2.0/lit-element.js",
+      "lit-html": "https://ga.jspm.io/npm:lit-html@3.3.0/lit-html.js",
+      "lit-html/is-server.js": "https://ga.jspm.io/npm:lit-html@3.3.0/is-server.js"
+    }
+  },
+  "integrity": {}
 }
 ```
 
@@ -46,9 +60,20 @@
 ```json
 {
   "imports": {
-    "vue": "/web_dependencies/vue@3.5.17/dist/vue.runtime.esm-browser.prod.js",
-    "jquery": "/web_dependencies/jquery@3.7.1/dist/jquery.js"
-  }
+    "jquery": "/node_modules/jquery/dist/jquery.js",
+    "lit": "/node_modules/lit/index.js",
+    "vue": "/node_modules/vue/dist/vue.runtime.esm-browser.prod.js",
+    "xstate": "/node_modules/xstate/dist/xstate.cjs.mjs"
+  },
+  "scopes": {
+    "/node_modules/": {
+      "@lit/reactive-element": "/node_modules/.medusa/@lit/reactive-element@2.1.0/reactive-element.js",
+      "lit-element/lit-element.js": "/node_modules/.medusa/lit-element@4.2.0/lit-element.js",
+      "lit-html": "/node_modules/.medusa/lit-html@3.3.0/lit-html.js",
+      "lit-html/is-server.js": "/node_modules/.medusa/lit-html@3.3.0/is-server.js"
+    }
+  },
+  "integrity": {}
 }
 ```
 
