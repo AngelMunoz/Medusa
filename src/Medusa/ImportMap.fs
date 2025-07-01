@@ -21,11 +21,11 @@ module ImportMap =
   let private cachePath =
     lazy
       Path.Combine(
-       Environment.GetFolderPath Environment.SpecialFolder.LocalApplicationData,
-       "medusa",
-       "v1",
-       "store"
-     )
+        Environment.GetFolderPath Environment.SpecialFolder.LocalApplicationData,
+        "medusa",
+        "v1",
+        "store"
+      )
 
   let private localCachePath =
     lazy Path.Combine(Directory.GetCurrentDirectory(), "node_modules")
@@ -60,6 +60,11 @@ module ImportMap =
       let cacheDir = Directory.CreateDirectory(cachePath.Value)
       let localCacheDir = Directory.CreateDirectory(localCachePath.Value)
 
+      let medusaDir =
+        Directory.CreateDirectory(
+          Path.Combine(localCacheDir.FullName, ".medusa")
+        )
+
       logger.LogDebug(
         "Caching downloaded packages to: {cacheDir}",
         cacheDir.FullName
@@ -72,32 +77,68 @@ module ImportMap =
         |> Map.toArray
         |> Array.map(fun (package, content) -> asyncEx {
           let! token = Async.CancellationToken
-          let localPkgPath = Path.Combine(localCacheDir.FullName, package)
+          let medusaPkgPath = Path.Combine(medusaDir.FullName, package)
           let localPkgTarget = Path.Combine(cacheDir.FullName, package)
 
-          // Create Parent Directories
-          Path.GetDirectoryName(localPkgPath)
+          // Extract the package name without a version for flat structure
+          let packageName =
+            if package.StartsWith("@") then
+              // Scoped package: @scope/package@version -> @scope/package
+              let parts = package.Split('@')
+
+              if parts.Length > 2 then
+                "@" + parts[1] + "@" + parts[2]
+              else
+                package
+            else
+              // Regular package: package@version -> package
+              let parts = package.Split('@')
+              if parts.Length > 1 then parts[0] else package
+
+          let flatPkgPath = Path.Combine(localCacheDir.FullName, packageName)
+
+          // Create Parent Directories for the medusa path
+          Path.GetDirectoryName(medusaPkgPath)
           |> nonNull
           |> Directory.CreateDirectory
           |> ignore
 
-          // If the local store already has the package, skip creating the symbolic link
-          if Directory.Exists(localPkgPath) then
+          // Create Parent Directories for flat path
+          Path.GetDirectoryName(flatPkgPath)
+          |> nonNull
+          |> Directory.CreateDirectory
+          |> ignore
+
+          // If the medusa store already has the package, skip creating the symbolic link
+          if Directory.Exists(medusaPkgPath) then
             logger.LogDebug(
-              "Package '{package}' already exists, skipping symbolic link creation.",
+              "Package '{package}' already exists in medusa store, skipping symbolic link creation.",
               package
             )
-
-            return ()
           else
             logger.LogDebug(
-              "Creating symlink to store: {localPkgPath} -> {localPkgTarget}",
-              localPkgPath,
+              "Creating symlink to store: {medusaPkgPath} -> {localPkgTarget}",
+              medusaPkgPath,
               localPkgTarget
             )
 
-            Directory.CreateSymbolicLink(localPkgPath, localPkgTarget)
+            Directory.CreateSymbolicLink(medusaPkgPath, localPkgTarget)
             |> ignore
+
+          // Create flat symlink if it doesn't exist
+          if Directory.Exists(flatPkgPath) then
+            logger.LogDebug(
+              "Flat package '{packageName}' already exists, skipping flat symlink creation.",
+              packageName
+            )
+          else
+            logger.LogDebug(
+              "Creating flat symlink: {flatPkgPath} -> {medusaPkgPath}",
+              flatPkgPath,
+              medusaPkgPath
+            )
+
+            Directory.CreateSymbolicLink(flatPkgPath, medusaPkgPath) |> ignore
 
           if Directory.Exists(Path.Combine(cacheDir.FullName, package)) then
             logger.LogDebug(
@@ -289,7 +330,7 @@ module ImportMap =
           pkgNameFromKey = pkgName || importUrl.Contains(k))
 
       // Helper function to convert URL to the local cache path
-      let convertToLocalPath importUrl matchingKey =
+      let convertToLocalPath importUrl matchingKey isScoped =
         match matchingKey with
         | None -> importUrl
         | Some key ->
@@ -299,7 +340,27 @@ module ImportMap =
           if filePath = importUrl then
             importUrl
           else
-            Path.Combine(localPrefix, key, filePath).Replace('\\', '/')
+            let basePath =
+              if isScoped then
+                // Scoped packages point to .medusa/<package@version>
+                Path.Combine(localPrefix, ".medusa", key)
+              else
+                // Non-scoped packages point to a flat structure
+                let packageName =
+                  if key.StartsWith("@") then
+                    let parts = key.Split('@')
+
+                    if parts.Length > 2 then
+                      "@" + parts[1] + "@" + parts[2]
+                    else
+                      key
+                  else
+                    let parts = key.Split('@')
+                    if parts.Length > 1 then parts[0] else key
+
+                Path.Combine(localPrefix, packageName)
+
+            Path.Combine(basePath, filePath).Replace('\\', '/')
 
       // Helper function to update a scope map
       let updateScopeMap(scopeMap: Map<string, string>) =
@@ -313,7 +374,7 @@ module ImportMap =
             importUrl
           )
 
-          let converted = convertToLocalPath importUrl matchingKey
+          let converted = convertToLocalPath importUrl matchingKey true
 
           logger.LogDebug(
             "Converted import URL to local path: '{converted}'",
@@ -327,12 +388,12 @@ module ImportMap =
         map.imports
         |> Map.map(fun pkgName importUrl ->
           let matchingKey = findMatchingKey pkgName importUrl
-          convertToLocalPath importUrl matchingKey)
+          convertToLocalPath importUrl matchingKey false)
 
       let updatedScopes =
         map.scopes
         |> Seq.map(fun (KeyValue(_, scopeMap)) ->
-          localPrefix, updateScopeMap scopeMap)
+          localPrefix + "/", updateScopeMap scopeMap)
         |> Map.ofSeq
 
       let offlineMap = {

@@ -46,11 +46,11 @@ let main args =
     let imService, logger = orchestrate()
     logger.LogInformation("Starting installation and offline caching...")
 
-    logger.LogInformation("Installing packages: jquery, xstate, vue")
+    logger.LogInformation("Installing packages: jquery, xstate, vue, lit")
 
     let! result =
       imService.Install(
-        [ "jquery"; "xstate"; "vue" ],
+        [ "jquery"; "xstate"; "vue"; "lit" ],
         cancellationToken = cts.Token
       )
 

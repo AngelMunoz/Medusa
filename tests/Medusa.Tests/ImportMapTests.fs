@@ -196,8 +196,8 @@ type ImportMapTests() =
     // Assert
     Assert.IsNotNull(result)
     Assert.IsTrue(result.imports.ContainsKey("react"))
-    // The URL should be converted to a local path starting with /web_dependencies
-    Assert.IsTrue(result.imports["react"].StartsWith("/web_dependencies"))
+    // The URL should be converted to a local path starting with /node_modules
+    Assert.IsTrue(result.imports["react"].StartsWith("/node_modules"))
   }
 
   [<TestMethod>]
