@@ -1,8 +1,6 @@
 namespace Medusa.Tests
 
 open System
-open System.Collections.Generic
-open System.Threading
 open System.Threading.Tasks
 open Microsoft.Extensions.Logging
 open Microsoft.VisualStudio.TestTools.UnitTesting

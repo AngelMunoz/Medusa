@@ -2,11 +2,9 @@
 open System.Text.Json
 open System.IO
 open System.Threading
-open System.Threading.Tasks
 
 open Microsoft.Extensions.Logging
 
-open JDeck
 
 open Medusa
 open Medusa.Types

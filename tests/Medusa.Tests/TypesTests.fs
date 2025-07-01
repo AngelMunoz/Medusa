@@ -1,7 +1,6 @@
 namespace Medusa.Tests
 
 open System
-open System.Collections.Generic
 open Microsoft.VisualStudio.TestTools.UnitTesting
 open Medusa
 open Medusa.Types
@@ -255,7 +254,7 @@ type TypesTests() =
       (Provider.Custom "my-provider", "my-provider")
     ]
 
-    for (provider, expected) in testCases do
+    for provider, expected in testCases do
       let options = [ DefaultProvider provider ]
       let result = GeneratorOption.toDict options
       Assert.IsTrue(result.ContainsKey("defaultProvider"))

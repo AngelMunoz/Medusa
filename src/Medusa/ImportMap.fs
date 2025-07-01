@@ -7,7 +7,6 @@ open System.Threading
 open Microsoft.Extensions.Logging
 open FsHttp
 open IcedTasks
-open JDeck
 open Medusa
 open Medusa.Types
 open System.Threading.Tasks
@@ -21,18 +20,20 @@ module ImportMap =
 
   let private cachePath =
     lazy
-      (Path.Combine(
-        Environment.GetFolderPath Environment.SpecialFolder.LocalApplicationData,
-        "medusa",
-        "v1",
-        "store"
-      ))
+      Path.Combine(
+       Environment.GetFolderPath Environment.SpecialFolder.LocalApplicationData,
+       "medusa",
+       "v1",
+       "store"
+     )
 
   let private localCachePath =
-    lazy (Path.Combine(Directory.GetCurrentDirectory(), "web_dependencies"))
+    lazy Path.Combine(Directory.GetCurrentDirectory(), "node_modules")
 
+  /// strictly speaking, these are not node modules; however, I think
+  /// it might help with existing tooling trying to discover the sources
   [<Literal>]
-  let private LOCAL_CACHE_PREFIX = "/web_dependencies"
+  let private LOCAL_CACHE_PREFIX = "/node_modules"
 
   // Use shared JSON options for consistent serialization/deserialization
   let private jsonOptions: Lazy<JsonSerializerOptions> = JsonOptions.shared
@@ -274,12 +275,12 @@ module ImportMap =
 
       let localPrefix = LOCAL_CACHE_PREFIX
 
-      // Helper function to extract package name from key
+      // Helper function to extract the package name from a key
       let extractPackageName(key: string) =
         let parts = key.Split('@')
         if parts.Length > 2 then "@" + parts[1] else parts[0]
 
-      // Helper function to find matching package key
+      // Helper function to find a matching package key
       let findMatchingKey (pkgName: string) (importUrl: string) =
         pkgs
         |> Map.keys
@@ -287,7 +288,7 @@ module ImportMap =
           let pkgNameFromKey = extractPackageName k
           pkgNameFromKey = pkgName || importUrl.Contains(k))
 
-      // Helper function to convert URL to local cache path
+      // Helper function to convert URL to the local cache path
       let convertToLocalPath importUrl matchingKey =
         match matchingKey with
         | None -> importUrl

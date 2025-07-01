@@ -6,10 +6,10 @@ open System.Text.RegularExpressions
 module Provider =
   open Microsoft.Extensions.Logging
 
-  let private jspmRegex = lazy (Regex("npm:((?:@[^/]+/)?[^@/]+@[^/]+)"))
-  let private esmRegex = lazy (Regex("\*((?:@[^/]+/)?[^@/]+@[^/]+)"))
-  let private jsdelivrRegex = lazy (Regex("npm/((?:@[^/]+/)?[^@/]+@[^/]+)"))
-  let private unpkgRegex = lazy (Regex("/((?:@[^/]+/)?[^@/]+@[^/]+)"))
+  let private jspmRegex = lazy Regex("npm:((?:@[^/]+/)?[^@/]+@[^/]+)")
+  let private esmRegex = lazy Regex("\*((?:@[^/]+/)?[^@/]+@[^/]+)")
+  let private jsdelivrRegex = lazy Regex("npm/((?:@[^/]+/)?[^@/]+@[^/]+)")
+  let private unpkgRegex = lazy Regex("/((?:@[^/]+/)?[^@/]+@[^/]+)")
 
   type ExtractionError = { host: string; url: Uri }
 
